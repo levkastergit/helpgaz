@@ -219,6 +219,90 @@ public class ComparerTests
         Assert.Equal(1235, ContractMatcher.Match(folder, contracts).Contract?.Id);
     }
 
+    private static readonly Contract[] RealisticContracts =
+    {
+        new(1, "", "Газификация жилого дома на участке с к.н. 00:00:0000000:16 в д. Тестово", "Участкова Анна Николаевна", ""),
+        new(2, "", "Газоснабжение квартиры №7 многоквартирного жилого дома по адресу: г. Энск, ул. Речная, д. 13", "Квартирова Юлия Сергеевна", ""),
+        new(3, "", "Газификация индивидуального жилого дома по адресу: д. Заречье, д. 5", "Образцов Игорь Викторович", ""),
+        new(4, "14-2023", "Газоснабжение жилого дома по адресу: д. Луговое", "Примеров Сергей Анатольевич", ""),
+        new(5, "", "Газификация жилого дома по адресу: д. Старое", "Двойников Пётр Иванович", ""),
+        new(6, "", "Газификация жилого дома по адресу: д. Новое", "Двойников Олег Павлович", ""),
+        new(7, "494", "Газификация жилого дома по адресу: д. Лесное", "Номеров Павел Павлович", ""),
+    };
+
+    [Theory]
+    [InlineData("494 Незнакомов В.А. 16 февраля 2024 (папка в газпроме, остаток оплатить)")]
+    [InlineData("268 Незнакомова Т.В. 16 июня 2023")]
+    [InlineData("927 Незнакомов С.А. 13 марта 2025 (Папка в газпроме,Незнаю по оплате)")]
+    [InlineData("322 Незнакомова И.В. 13 июля 2023")]
+    [InlineData("Журнал сварочных")]
+    public void DigitsDatesAndInitialsDoNotMatchAddress(string folder)
+    {
+        Assert.Null(ContractMatcher.Match(folder, RealisticContracts).Contract);
+    }
+
+    [Theory]
+    [InlineData("148 Образцов И.В. 03 ноября 2022", 3)]
+    [InlineData("Примеров Луговое", 4)]
+    [InlineData("14-2023 Примеров", 4)]
+    [InlineData("Двойников д.Старое", 5)]
+    [InlineData("1045 Двойников О.П. 16 сентября 2025", 6)]
+    public void SurnameFindsContract(string folder, int id)
+    {
+        Assert.Equal(id, ContractMatcher.Match(folder, RealisticContracts).Contract?.Id);
+    }
+
+    [Fact]
+    public void WrongInitialsRejectNamesake()
+    {
+        Assert.Null(ContractMatcher.Match("200 Образцов К.Н. 05 августа 2025", RealisticContracts).Contract);
+    }
+
+    [Fact]
+    public void LeadingNumberDoesNotBeatDifferentSurname()
+    {
+        Assert.Null(ContractMatcher.Match("494 Незнакомов В.А. 05 февраля 2024", RealisticContracts).Contract);
+    }
+
+    [Fact]
+    public void NamesakesWithoutDetailsAreNotGuessed()
+    {
+        var match = ContractMatcher.Match("Двойников", RealisticContracts);
+        Assert.Null(match.Contract);
+        Assert.Equal(2, match.Candidates.Count);
+    }
+
+    [Fact]
+    public void ContractDateSeparatesNamesakesWithSameInitials()
+    {
+        var contracts = new[]
+        {
+            new Contract(1, "", "", "Близнецов Пётр Иванович", "", "2023-06-16"),
+            new Contract(2, "", "", "Близнецов Павел Ильич", "", "2024-02-16"),
+        };
+        Assert.Equal(2, ContractMatcher.Match("10 Близнецов П.И. 16 февраля 2024", contracts).Contract?.Id);
+    }
+
+    [Fact]
+    public void CompanyNameFindsContract()
+    {
+        var contracts = new[] { new Contract(1, "", "г. Энск", "", "ООО Ромашка"), new Contract(2, "", "г. Энск", "", "ООО Василёк") };
+        Assert.Equal(1, ContractMatcher.Match("ООО Ромашка 2024", contracts).Contract?.Id);
+    }
+
+    [Fact]
+    public void WholeFolderNameEqualToContractNumberMatches()
+    {
+        var contracts = new[] { new Contract(1, "123", "", "Кто-то", "") };
+        Assert.Equal(1, ContractMatcher.Match("123", contracts).Contract?.Id);
+    }
+
+    [Fact]
+    public void AddressAloneWorksWhenEveryWordIsExplained()
+    {
+        Assert.Equal(2, ContractMatcher.Match("Речная 13", RealisticContracts).Contract?.Id);
+    }
+
     [Fact]
     public void SiteArchiveNameWithUnknownIdChoosesNothing()
     {

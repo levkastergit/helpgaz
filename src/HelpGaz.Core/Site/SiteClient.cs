@@ -6,7 +6,7 @@ using System.Text.Json;
 namespace HelpGaz.Core.Site;
 
 public sealed record SiteTemplate(int Id, string DisplayName, string FileName);
-public sealed record Contract(int Id, string Number, string Address, string Customer, string Company);
+public sealed record Contract(int Id, string Number, string Address, string Customer, string Company, string Date = "");
 public sealed record LoginResult(string Token, string Email);
 
 public sealed class SiteAuthException(string message) : Exception(message);
@@ -72,7 +72,7 @@ public sealed class SiteClient : IDisposable
         foreach (var c in doc.RootElement.EnumerateArray())
         {
             if (!int.TryParse(Text(c, "id"), out var id)) continue;
-            list.Add(new Contract(id, Text(c, "contractNumber"), Text(c, "objectName"), Text(c, "fio"), Text(c, "namecompany")));
+            list.Add(new Contract(id, Text(c, "contractNumber"), Text(c, "objectName"), Text(c, "fio"), Text(c, "namecompany"), Text(c, "date")));
         }
         return list;
     }
