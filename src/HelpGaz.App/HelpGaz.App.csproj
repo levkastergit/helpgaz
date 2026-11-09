@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>HelpGaz</AssemblyName>
+    <RootNamespace>HelpGaz.App</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationVisualStyles>true</ApplicationVisualStyles>
+    <ApplicationDefaultFont>Segoe UI, 9pt</ApplicationDefaultFont>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\HelpGaz.Core\HelpGaz.Core.csproj" />
+  </ItemGroup>
+</Project>

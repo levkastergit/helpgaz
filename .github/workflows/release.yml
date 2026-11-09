@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Tests
+        run: dotnet test tests/HelpGaz.Tests/HelpGaz.Tests.csproj -c Release
+
+      - name: Publish
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          dotnet publish src/HelpGaz.App/HelpGaz.App.csproj -c Release -r win-x64 --self-contained true \
+            -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:Version="$VERSION" -o publish
+
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash publish/HelpGaz.exe -Algorithm SHA256).Hash
+          Set-Content -Path publish/HelpGaz.exe.sha256 -Value $hash -NoNewline
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            publish/HelpGaz.exe
+            publish/HelpGaz.exe.sha256
+          generate_release_notes: true
