@@ -210,6 +210,23 @@ public class ComparerTests
     }
 
     [Theory]
+    [InlineData("ITD_Files_1235")]
+    [InlineData("ITD_Files_1235 (2)")]
+    [InlineData("itd_files_1235")]
+    public void SiteArchiveNameGivesContractById(string folder)
+    {
+        var contracts = new[] { new Contract(1235, "", "", "", ""), new Contract(1236, "", "", "", "") };
+        Assert.Equal(1235, ContractMatcher.Match(folder, contracts).Contract?.Id);
+    }
+
+    [Fact]
+    public void SiteArchiveNameWithUnknownIdChoosesNothing()
+    {
+        var contracts = new[] { new Contract(1, "", "", "", "") };
+        Assert.Null(ContractMatcher.Match("ITD_Files_1235", contracts).Contract);
+    }
+
+    [Theory]
     [InlineData("№ 77-А Петров", true)]
     [InlineData("Сидоров", false)]
     public void ContractIsChosenOnlyWithStrongEvidence(string folder, bool chosen)

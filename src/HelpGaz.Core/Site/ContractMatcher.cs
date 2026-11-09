@@ -15,6 +15,9 @@ public static class ContractMatcher
 
     private static readonly Regex WordRx = new(@"[\p{L}\p{N}]+", RegexOptions.Compiled);
 
+    /// <summary>Кнопка «Скачать все» называет архив ITD_Files_&lt;id договора&gt;, браузер добавляет « (1)» к повторным скачиваниям.</summary>
+    private static readonly Regex SiteArchiveName = new(@"^ITD_Files_(\d+)(?:\s*\(\d+\))?$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static readonly HashSet<string> StopWords = new()
     {
         "ул", "улица", "д", "дом", "г", "город", "р", "н", "р-н", "район", "обл", "область", "пос", "поселок", "п", "с", "село",
@@ -27,6 +30,11 @@ public static class ContractMatcher
 
     public static ContractMatch Match(string folderName, IReadOnlyList<Contract> contracts)
     {
+        var archive = SiteArchiveName.Match(folderName.Trim());
+        if (archive.Success && int.TryParse(archive.Groups[1].Value, out var contractId)
+            && contracts.FirstOrDefault(c => c.Id == contractId) is { } exact)
+            return new ContractMatch(exact, new[] { new ContractCandidate(exact, int.MaxValue) });
+
         var folderTokens = Tokens(folderName);
         var folder = folderTokens.ToHashSet();
         var candidates = contracts
