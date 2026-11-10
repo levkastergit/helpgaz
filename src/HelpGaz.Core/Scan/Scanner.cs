@@ -1,4 +1,6 @@
-﻿using HelpGaz.Core.Compare;
+﻿using System.Diagnostics;
+using HelpGaz.Core.Compare;
+using HelpGaz.Core.Diagnostics;
 using HelpGaz.Core.Docx;
 using HelpGaz.Core.Log;
 using HelpGaz.Core.Site;
@@ -56,19 +58,27 @@ public sealed class Scanner(SiteClient site, FindingsStore store)
         }
     }
 
+    /// <summary>Папка, которая проверялась последней. Нужна, чтобы при обрыве сказать, где остановились.</summary>
+    public string? CurrentFolder { get; private set; }
+
     public async Task<List<FolderScanResult>> ScanAsync(string root, IProgress<ScanProgress>? progress, CancellationToken ct)
     {
+        var watch = Stopwatch.StartNew();
         var folders = FindObjectFolders(root);
+        AppLog.Info($"=== Проверка: «{root}», папок с .docx: {folders.Count}");
         var templates = await site.GetTemplatesAsync(ct);
         var custom = await site.GetCustomItdTemplatesAsync(ct);
         var contracts = await site.GetContractsAsync(ct);
+        AppLog.Info($"Шаблонов: {templates.Count}, своих документов ИТД: {custom.Count}, договоров: {contracts.Count}");
 
         var results = new List<FolderScanResult>();
         for (var i = 0; i < folders.Count; i++)
         {
             ct.ThrowIfCancellationRequested();
+            CurrentFolder = folders[i];
             results.Add(await ScanFolderAsync(folders[i], i, folders.Count, templates, custom, contracts, progress, ct));
         }
+        AppLog.Info($"=== Проверка завершена: папок {results.Count} за {watch.Elapsed:hh\\:mm\\:ss}");
         return results;
     }
 
@@ -76,11 +86,15 @@ public sealed class Scanner(SiteClient site, FindingsStore store)
         IReadOnlyList<SiteTemplate> templates, IReadOnlyList<SiteTemplate> custom, IReadOnlyList<Contract> contracts,
         IProgress<ScanProgress>? progress, CancellationToken ct)
     {
+        var watch = Stopwatch.StartNew();
         var (match, note) = ResolveContract(folder, contracts);
         var contract = match.Contract;
         var docs = new List<DocumentResult>();
         var findings = new List<Finding>();
         var files = DocxFiles(folder).ToList();
+
+        AppLog.Info($"Папка {index + 1}/{total}: «{folder}», .docx: {files.Count}");
+        AppLog.Info("  договор: " + DescribeContract(match, note, contracts));
 
         foreach (var path in files)
         {
@@ -93,6 +107,7 @@ public sealed class Scanner(SiteClient site, FindingsStore store)
                 var resolved = DocumentCatalog.Resolve(name, templates, custom);
                 if (resolved is null)
                 {
+                    AppLog.Info($"  «{name}»: неизвестный документ (нормализованное имя «{DocumentCatalog.Normalize(name)}»)");
                     findings.Add(new Finding
                     {
                         Kind = FindingKind.UnknownDocument,
@@ -103,7 +118,11 @@ public sealed class Scanner(SiteClient site, FindingsStore store)
                     });
                     continue;
                 }
-                if (resolved.Binary) continue;
+                if (resolved.Binary)
+                {
+                    AppLog.Info($"  «{name}»: шаблон «{resolved.TemplateFile}» с картинками, не сверяется");
+                    continue;
+                }
 
                 var template = await TemplateFor(resolved, ct);
                 DocModel? siteDoc = null;
@@ -115,6 +134,7 @@ public sealed class Scanner(SiteClient site, FindingsStore store)
                     }
                     catch (SiteException e)
                     {
+                        AppLog.Warn($"  «{name}»: сайт не сформировал документ {resolved.GenerateUrlPrefix}/{contract.Id}: {e.Message}");
                         findings.Add(ErrorFinding(resolved.TemplateFile, name, "Сайт не сформировал документ: " + e.Message));
                     }
                 }
@@ -130,9 +150,13 @@ public sealed class Scanner(SiteClient site, FindingsStore store)
                 });
                 docs.Add(result);
                 findings.AddRange(result.Findings);
+                AppLog.Info($"  «{name}»: шаблон #{resolved.TemplateId} «{resolved.TemplateFile}», значения {(siteDoc is null ? "не сверялись" : "сверены с сайтом")}, находок {result.Findings.Count}"
+                    + (result.Findings.Count > 0 ? " (" + string.Join(", ", result.Findings.GroupBy(f => f.Kind).Select(g => $"{g.Key}: {g.Count()}")) + ")" : ""));
             }
-            catch (Exception e) when (e is InvalidDataException or IOException or System.Xml.XmlException or SiteException)
+            catch (Exception e) when (e is not (OperationCanceledException or SiteAuthException or HttpRequestException))
             {
+                // Сбой разбора одного файла не должен обрывать проверку остальных папок.
+                AppLog.Error($"  «{name}»: ошибка при проверке", e);
                 findings.Add(ErrorFinding(name, name, e.Message));
             }
         }
@@ -152,8 +176,10 @@ public sealed class Scanner(SiteClient site, FindingsStore store)
             DocumentsClean = clean,
             Findings = findings.Count(f => f.Kind != FindingKind.FrozenField),
             LastScan = DateTime.Now,
+            AppVersion = Updater.CurrentVersion.ToString(3),
         }, findings, DateTime.Now);
 
+        AppLog.Info($"  итог: документов {docs.Count}, совпало {clean}, находок {findings.Count(f => f.Kind != FindingKind.FrozenField)} за {watch.ElapsedMilliseconds} мс");
         return new FolderScanResult
         {
             Folder = folder,
@@ -184,6 +210,25 @@ public sealed class Scanner(SiteClient site, FindingsStore store)
             _ => "",
         };
         return (match, note);
+    }
+
+    private static string DescribeContract(ContractMatch match, string note, IReadOnlyList<Contract> contracts)
+    {
+        static string Short(Contract c) => $"#{c.Id}" + (c.Number.Length > 0 ? $" №{c.Number}" : "");
+
+        if (match.MissingId is { } missing)
+        {
+            var near = contracts.Select(c => c.Id).Where(id => Math.Abs(id - missing) <= 3).Order().ToList();
+            return $"по архиву ITD_Files: id {missing} НЕ найден среди {contracts.Count} договоров"
+                + (match.FromParent is { } p ? $" (имя взято у папки «{p}»)" : "")
+                + $"; ближайшие id: {(near.Count > 0 ? string.Join(", ", near) : "нет")}";
+        }
+
+        var candidates = match.Candidates.Count == 0 ? "нет"
+            : string.Join("; ", match.Candidates.Select(c => $"{Short(c.Contract)} {(c.Score == int.MaxValue ? "по id" : "балл " + c.Score)}"));
+        if (match.Contract is { } chosen)
+            return $"{Title(chosen)}" + (note.Length > 0 ? $" [{note}]" : "") + $"; кандидаты: {candidates}";
+        return $"не выбран; кандидаты: {candidates}";
     }
 
     public static string Title(Contract c)

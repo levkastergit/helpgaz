@@ -1,5 +1,8 @@
-﻿using System.Security.Cryptography;
+﻿using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
+using HelpGaz.Core.Diagnostics;
+using HelpGaz.Core.Scan;
 
 namespace HelpGaz.App;
 
@@ -8,8 +11,23 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        AppLog.Init(AppPaths.Logs);
+        AppLog.Info($"Запуск HelpGaz v{Updater.CurrentVersion.ToString(3)}: «{Environment.ProcessPath}», данные «{AppPaths.Root}», "
+            + $"{Environment.OSVersion}, .NET {Environment.Version}, язык {CultureInfo.CurrentCulture.Name}");
+
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) =>
+        {
+            AppLog.Error("Необработанная ошибка", e.Exception);
+            MessageBox.Show("Произошла ошибка: " + e.Exception.Message + "\n\nПодробности записаны в лог программы.", "HelpGaz",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => AppLog.Error("Необработанная ошибка, программа закрывается", e.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (_, e) => AppLog.Error("Ошибка фоновой задачи", e.Exception);
+
         ApplicationConfiguration.Initialize();
         Application.Run(new MainForm());
+        AppLog.Info("Выход");
     }
 }
 
@@ -19,6 +37,7 @@ internal static class AppPaths
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HelpGaz");
     public static readonly string Findings = Path.Combine(Root, "findings.json");
     public static readonly string Session = Path.Combine(Root, "session.bin");
+    public static readonly string Logs = Path.Combine(Root, "logs");
 }
 
 /// <summary>Токен сайта хранится зашифрованным средствами Windows. Пароль на диск не записывается.</summary>

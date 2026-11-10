@@ -1,7 +1,9 @@
-﻿using System.Net;
+﻿using System.Diagnostics;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using HelpGaz.Core.Diagnostics;
 
 namespace HelpGaz.Core.Site;
 
@@ -39,7 +41,9 @@ public sealed class SiteClient : IDisposable
         await _gate.WaitAsync(ct);
         try
         {
-            using var resp = await _http.PostAsJsonAsync("/api/auth/login", new { email, password }, ct);
+            var watch = Stopwatch.StartNew();
+            using var resp = await Logged("POST /api/auth/login", () => _http.PostAsJsonAsync("/api/auth/login", new { email, password }, ct));
+            AppLog.Info($"POST /api/auth/login → {(int)resp.StatusCode} за {watch.ElapsedMilliseconds} мс");
             if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
                 throw new SiteAuthException(await ReadMessage(resp, "Неверный email или пароль."));
             if (!resp.IsSuccessStatusCode)
@@ -68,12 +72,25 @@ public sealed class SiteClient : IDisposable
     public async Task<IReadOnlyList<Contract>> GetContractsAsync(CancellationToken ct = default)
     {
         using var doc = JsonDocument.Parse(await GetBytesAsync("/contracts", ct));
+        if (doc.RootElement.ValueKind != JsonValueKind.Array)
+        {
+            AppLog.Error($"/contracts: ожидался массив, пришло {doc.RootElement.ValueKind}");
+            throw new SiteException("Сайт вернул список договоров в неожиданном виде.");
+        }
+
         var list = new List<Contract>();
+        var skipped = 0;
         foreach (var c in doc.RootElement.EnumerateArray())
         {
-            if (!int.TryParse(Text(c, "id"), out var id)) continue;
+            if (!int.TryParse(Text(c, "id"), out var id)) { skipped++; continue; }
             list.Add(new Contract(id, Text(c, "contractNumber"), Text(c, "objectName"), Text(c, "fio"), Text(c, "namecompany"), Text(c, "date")));
         }
+
+        var first = doc.RootElement.GetArrayLength() > 0 ? doc.RootElement[0] : default;
+        var idKind = first.ValueKind == JsonValueKind.Object && first.TryGetProperty("id", out var idValue) ? idValue.ValueKind.ToString() : "нет";
+        AppLog.Info(list.Count == 0
+            ? $"Договоров с сайта: 0 (элементов в ответе {doc.RootElement.GetArrayLength()}, без id {skipped})"
+            : $"Договоров с сайта: {list.Count}, id от {list.Min(c => c.Id)} до {list.Max(c => c.Id)}; пропущено без id: {skipped}; тип id: {idKind}");
         return list;
     }
 
@@ -103,14 +120,38 @@ public sealed class SiteClient : IDisposable
         await _gate.WaitAsync(ct);
         try
         {
-            using var resp = await _http.GetAsync(path, ct);
+            var watch = Stopwatch.StartNew();
+            using var resp = await Logged("GET " + path, () => _http.GetAsync(path, ct));
             if (resp.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                AppLog.Warn($"GET {path} → 401 за {watch.ElapsedMilliseconds} мс");
                 throw new SiteAuthException("Сессия на сайте истекла, войдите заново.");
+            }
             if (!resp.IsSuccessStatusCode)
-                throw new SiteException(await ReadMessage(resp, $"Сайт ответил ошибкой {(int)resp.StatusCode}."));
-            return await resp.Content.ReadAsByteArrayAsync(ct);
+            {
+                var message = await ReadMessage(resp, $"Сайт ответил ошибкой {(int)resp.StatusCode}.");
+                AppLog.Warn($"GET {path} → {(int)resp.StatusCode} за {watch.ElapsedMilliseconds} мс: {message}");
+                throw new SiteException(message);
+            }
+            var bytes = await resp.Content.ReadAsByteArrayAsync(ct);
+            AppLog.Info($"GET {path} → {(int)resp.StatusCode}, {bytes.Length} байт за {watch.ElapsedMilliseconds} мс");
+            return bytes;
         }
         finally { _gate.Release(); }
+    }
+
+    /// <summary>Сетевые сбои и таймауты попадают в лог до того, как уйдут выше.</summary>
+    private static async Task<HttpResponseMessage> Logged(string request, Func<Task<HttpResponseMessage>> send)
+    {
+        try
+        {
+            return await send();
+        }
+        catch (Exception e) when (e is HttpRequestException or OperationCanceledException)
+        {
+            AppLog.Error($"{request}: нет ответа", e);
+            throw;
+        }
     }
 
     private static async Task<string> ReadMessage(HttpResponseMessage resp, string fallback)

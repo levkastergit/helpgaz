@@ -326,6 +326,22 @@ public class ComparerTests
     }
 
     [Fact]
+    public void AppLogAppendsReadableLines()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "helpgaz-log-" + Guid.NewGuid());
+        HelpGaz.Core.Diagnostics.AppLog.Init(dir);
+        HelpGaz.Core.Diagnostics.AppLog.Info("первая строка");
+        HelpGaz.Core.Diagnostics.AppLog.Error("вторая строка", new InvalidOperationException("сбой"));
+
+        var file = HelpGaz.Core.Diagnostics.AppLog.CurrentFile!;
+        using var reader = new StreamReader(new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete));
+        var text = reader.ReadToEnd();
+        Assert.Contains("[INFO ] первая строка", text);
+        Assert.Contains("[ERROR] вторая строка", text);
+        Assert.Contains("InvalidOperationException: сбой", text);
+    }
+
+    [Fact]
     public void SubfolderOfMissingArchiveReportsMissingId()
     {
         var match = ContractMatcher.MatchPath(@"X:\ИТД\ITD_Files_940\Новая папка", WithArchive);

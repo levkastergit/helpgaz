@@ -1,5 +1,6 @@
 ﻿using System.Diagnostics;
 using HelpGaz.Core.Compare;
+using HelpGaz.Core.Diagnostics;
 using HelpGaz.Core.Log;
 using HelpGaz.Core.Scan;
 using HelpGaz.Core.Site;
@@ -100,16 +101,21 @@ internal sealed class MainForm : Form
 
     private TabPage BuildFoldersTab()
     {
-        AddColumn(_folders, "Папка", 34);
+        AddColumn(_folders, "Папка", 28);
         AddColumn(_folders, "Договор", 34);
         AddColumn(_folders, "Документов", 9, DataGridViewContentAlignment.MiddleCenter);
         AddColumn(_folders, "Совпало", 8, DataGridViewContentAlignment.MiddleCenter);
         AddColumn(_folders, "Находок", 8, DataGridViewContentAlignment.MiddleCenter);
-        AddColumn(_folders, "Итог", 15);
+        AddColumn(_folders, "Итог", 12);
+        AddColumn(_folders, "Проверено", 20);
+
+        var log = new Button { Text = "Лог программы", AutoSize = true, Margin = new Padding(24, 3, 3, 3) };
+        log.Click += (_, _) => OpenLog();
 
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 40, Padding = new Padding(2) };
         buttons.Controls.Add(_pick);
         buttons.Controls.Add(_rescan);
+        buttons.Controls.Add(log);
 
         var page = new TabPage("Папки") { Padding = new Padding(6) };
         page.Controls.Add(_folders);
@@ -154,9 +160,9 @@ internal sealed class MainForm : Form
         var open = new Button { Text = "Открыть файл", AutoSize = true, Margin = new Padding(24, 3, 3, 3) };
         open.Click += (_, _) => OpenSelectedFile();
         statusButtons.Controls.Add(open);
-        var log = new Button { Text = "Папка журнала", AutoSize = true };
-        log.Click += (_, _) => { Directory.CreateDirectory(AppPaths.Root); Process.Start(new ProcessStartInfo(AppPaths.Root) { UseShellExecute = true }); };
-        statusButtons.Controls.Add(log);
+        var journal = new Button { Text = "Папка журнала", AutoSize = true };
+        journal.Click += (_, _) => { Directory.CreateDirectory(AppPaths.Root); Process.Start(new ProcessStartInfo(AppPaths.Root) { UseShellExecute = true }); };
+        statusButtons.Controls.Add(journal);
 
         var right = new Panel { Dock = DockStyle.Fill };
         right.Controls.Add(_occurrences);
@@ -210,8 +216,21 @@ internal sealed class MainForm : Form
         _occurrences.CellDoubleClick += (_, e) => { if (e.RowIndex >= 0) OpenSelectedFile(); };
     }
 
+    /// <summary>Открывает папку с логами и выделяет сегодняшний файл.</summary>
+    private static void OpenLog()
+    {
+        Directory.CreateDirectory(AppPaths.Logs);
+        if (AppLog.CurrentFile is { } file && File.Exists(file))
+            Process.Start("explorer.exe", $"/select,\"{file}\"");
+        else
+            Process.Start(new ProcessStartInfo(AppPaths.Logs) { UseShellExecute = true });
+    }
+
     private async Task OnShownAsync()
     {
+        // Сначала обновление: иначе проверку, начатую сразу после запуска, сделала бы старая версия.
+        await AutoUpdateAsync();
+
         var session = SessionStore.Load();
         if (session is { } s)
         {
@@ -223,7 +242,6 @@ internal sealed class MainForm : Form
         {
             Login();
         }
-        await AutoUpdateAsync();
     }
 
     private void UpdateAccount() => _account.Text = _email is null ? "Войти" : _email + " (выйти)";
@@ -250,14 +268,26 @@ internal sealed class MainForm : Form
     private async Task AutoUpdateAsync()
     {
         var exe = Environment.ProcessPath;
-        if (exe is null || !Updater.Enabled) return;
+        if (exe is null || !Updater.Enabled)
+        {
+            AppLog.Info("Обновление отключено: сборка без версии или задан HELPGAZ_NO_UPDATE");
+            return;
+        }
         Updater.Cleanup(exe);
 
+        // Пока идёт проверка обновления, новую проверку папок не начинаем.
+        _start.Enabled = _pick.Enabled = _rescan.Enabled = false;
+        _status.Text = "Проверяю обновления…";
         try
         {
             using var updater = new Updater();
-            var release = await updater.FindNewerAsync(CancellationToken.None);
-            if (release is null) return;
+            using var lookup = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            var release = await updater.FindNewerAsync(lookup.Token);
+            if (release is null)
+            {
+                _status.Text = "Готово";
+                return;
+            }
 
             _status.Text = $"Скачиваю обновление {release.Tag}…";
             var downloaded = await updater.DownloadAsync(release, exe, CancellationToken.None);
@@ -268,10 +298,15 @@ internal sealed class MainForm : Form
             Updater.InstallAndRestart(downloaded, exe);
             Application.Exit();
         }
-        catch (Exception e) when (e is HttpRequestException or IOException or UnauthorizedAccessException or InvalidDataException or TaskCanceledException or System.Text.Json.JsonException or System.ComponentModel.Win32Exception)
+        catch (Exception e)
         {
             // Сбой обновления не должен мешать работе: программа попробует при следующем запуске.
+            AppLog.Error("Обновление не установлено", e);
             if (!_busy) _status.Text = "Обновление не установлено: " + e.Message;
+        }
+        finally
+        {
+            if (!_busy) _start.Enabled = _pick.Enabled = _rescan.Enabled = true;
         }
     }
 
@@ -303,10 +338,12 @@ internal sealed class MainForm : Form
         _scan = new CancellationTokenSource();
         var token = _scan.Token;
         var needRelogin = false;
+        var scanner = new Scanner(_site, _store);
+        string StoppedAt() => scanner.CurrentFolder is { } f ? $" на папке «{Path.GetFileName(f)}»" : "";
+        const string Stale = " Папки после неё показывают результаты прошлой проверки (см. столбец «Проверено»).";
 
         try
         {
-            var scanner = new Scanner(_site, _store);
             var progress = new Progress<ScanProgress>(p =>
             {
                 _progress.Maximum = p.FolderCount;
@@ -323,19 +360,36 @@ internal sealed class MainForm : Form
             _status.Text = $"Готово: папок {results.Count}, с находками {withFindings}"
                 + (noContract > 0 ? $", без договора {noContract} (значения в них не сверялись)" : "")
                 + (missing > 0 ? $"; из них {missing} — архивы ITD_Files с номером договора, которого нет на сайте" : "");
+            AppLog.Info(_status.Text);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
-            _status.Text = "Проверка остановлена. Уже проверенные папки сохранены.";
+            AppLog.Info("Проверка остановлена пользователем" + StoppedAt());
+            _status.Text = "Проверка остановлена" + StoppedAt() + "." + Stale;
+        }
+        catch (OperationCanceledException e)
+        {
+            // HttpClient сообщает о таймауте тем же исключением, что и об отмене.
+            AppLog.Error("Проверка прервана: сайт не ответил вовремя" + StoppedAt(), e);
+            _status.Text = "Сайт не ответил вовремя, проверка прервана" + StoppedAt() + "." + Stale;
+            MessageBox.Show(this, _status.Text + "\n\nПодробности в логе программы.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         catch (SiteAuthException)
         {
+            AppLog.Warn("Сессия истекла" + StoppedAt());
             needRelogin = true;
         }
         catch (Exception e) when (e is SiteException or HttpRequestException)
         {
-            _status.Text = "Ошибка связи с сайтом";
-            MessageBox.Show(this, "Не удалось получить данные с сайта:\n" + e.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            AppLog.Error("Проверка прервана: ошибка связи с сайтом" + StoppedAt(), e);
+            _status.Text = "Ошибка связи с сайтом, проверка прервана" + StoppedAt() + "." + Stale;
+            MessageBox.Show(this, "Не удалось получить данные с сайта:\n" + e.Message + "\n\n" + _status.Text, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        catch (Exception e)
+        {
+            AppLog.Error("Проверка прервана из-за ошибки" + StoppedAt(), e);
+            _status.Text = "Проверка прервана из-за ошибки" + StoppedAt() + "." + Stale;
+            MessageBox.Show(this, e.Message + "\n\n" + _status.Text + "\nПодробности в логе программы.", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {
@@ -364,17 +418,26 @@ internal sealed class MainForm : Form
     {
         var selected = SelectedFolder();
         _folders.Rows.Clear();
+        var current = Updater.CurrentVersion.ToString(3);
         foreach (var f in _store.Folders().Where(f => f.LastScan is not null).OrderBy(f => f.Path, StringComparer.CurrentCultureIgnoreCase))
         {
             var verdict = f.Findings == 0 ? "Всё совпало" : "Есть находки";
             var contract = f.ContractTitle.Length > 0 ? f.ContractTitle
                 : f.ContractNote.Length > 0 ? f.ContractNote
                 : "Договор не определён";
-            var row = _folders.Rows[_folders.Rows.Add(Path.GetFileName(f.Path.TrimEnd('\\', '/')), contract, f.Documents, f.DocumentsClean, f.Findings, verdict)];
+            // Результат старой версии мог устареть: например, до 1.0.1 архивы ITD_Files не связывались с договором.
+            var stale = f.AppVersion != current;
+            var scanned = $"{f.LastScan:dd.MM.yyyy HH:mm}" + (stale ? $", {(f.AppVersion.Length > 0 ? "v" + f.AppVersion : "до v1.0.4")}" : "");
+            var row = _folders.Rows[_folders.Rows.Add(Path.GetFileName(f.Path.TrimEnd('\\', '/')), contract, f.Documents, f.DocumentsClean, f.Findings, verdict, scanned)];
             row.Tag = f.Path;
             row.Cells[0].ToolTipText = f.Path;
             row.Cells[1].ToolTipText = f.ContractNote;
             row.DefaultCellStyle.ForeColor = f.Findings == 0 ? Color.ForestGreen : SystemColors.ControlText;
+            if (stale)
+            {
+                row.Cells[6].Style.ForeColor = Color.Firebrick;
+                row.Cells[6].ToolTipText = "Папка проверена другой версией программы. Проверьте её заново.";
+            }
             if (f.ContractTitle.Length == 0) row.Cells[1].Style.ForeColor = Color.Firebrick;
             if (f.Path == selected) row.Selected = true;
         }
@@ -399,6 +462,7 @@ internal sealed class MainForm : Form
         using var picker = new ContractPickerForm(folder, contracts, _candidates.GetValueOrDefault(folder) ?? Array.Empty<ContractCandidate>());
         if (picker.ShowDialog(this) != DialogResult.OK || picker.Selected is null) return;
 
+        AppLog.Info($"Договор выбран вручную: «{folder}» → #{picker.Selected.Id}");
         _store.SetContract(folder, picker.Selected.Id, Scanner.Title(picker.Selected));
         await ScanAsync(folder);
     }

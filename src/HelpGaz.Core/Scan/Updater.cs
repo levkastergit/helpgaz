@@ -2,6 +2,7 @@
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
+using HelpGaz.Core.Diagnostics;
 
 namespace HelpGaz.Core.Scan;
 
@@ -39,10 +40,15 @@ public sealed class Updater : IDisposable
     public async Task<ReleaseInfo?> FindNewerAsync(CancellationToken ct)
     {
         using var resp = await _http.GetAsync(LatestRelease, ct);
-        if (!resp.IsSuccessStatusCode) return null;
+        if (!resp.IsSuccessStatusCode)
+        {
+            AppLog.Warn($"Обновление: GitHub ответил {(int)resp.StatusCode}");
+            return null;
+        }
 
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
         var tag = doc.RootElement.GetProperty("tag_name").GetString() ?? "";
+        AppLog.Info($"Обновление: сейчас v{CurrentVersion.ToString(3)}, последний релиз {tag}");
         if (!Version.TryParse(tag.TrimStart('v'), out var version) || version <= CurrentVersion) return null;
 
         string? exe = null, hash = null;
@@ -53,7 +59,12 @@ public sealed class Updater : IDisposable
             if (name == ExeName) exe = url;
             else if (name == ExeName + ".sha256") hash = url;
         }
-        return exe is null || hash is null ? null : new ReleaseInfo(version, tag, exe, hash);
+        if (exe is null || hash is null)
+        {
+            AppLog.Warn($"Обновление: в релизе {tag} нет {ExeName} или контрольной суммы");
+            return null;
+        }
+        return new ReleaseInfo(version, tag, exe, hash);
     }
 
     /// <summary>Скачивает новую версию рядом с текущей и возвращает путь к ней после проверки контрольной суммы.</summary>
@@ -74,8 +85,10 @@ public sealed class Updater : IDisposable
         if (!actual.Equals(expected, StringComparison.OrdinalIgnoreCase))
         {
             File.Delete(target);
+            AppLog.Error($"Обновление {release.Tag}: SHA-256 {actual}, ожидалась {expected}");
             throw new InvalidDataException("Контрольная сумма скачанного обновления не совпала.");
         }
+        AppLog.Info($"Обновление {release.Tag} скачано, SHA-256 совпала");
         return target;
     }
 
@@ -94,6 +107,7 @@ public sealed class Updater : IDisposable
             File.Move(old, currentExe);
             throw;
         }
+        AppLog.Info($"Обновление установлено в «{currentExe}», перезапуск");
         Process.Start(new ProcessStartInfo(currentExe) { UseShellExecute = true });
     }
 

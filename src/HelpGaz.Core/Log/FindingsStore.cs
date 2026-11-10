@@ -61,6 +61,9 @@ public sealed class FolderRecord
     public int DocumentsClean { get; set; }
     public int Findings { get; set; }
     public DateTime? LastScan { get; set; }
+
+    /// <summary>Версия программы, которой проверена папка. Пусто — проверено версией до 1.0.4.</summary>
+    public string AppVersion { get; set; } = "";
 }
 
 /// <summary>Журнал находок. Хранится в одном JSON-файле, чтобы его можно было открыть и передать для правки шаблонов.</summary>
