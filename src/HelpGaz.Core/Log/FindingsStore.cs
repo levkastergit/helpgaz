@@ -52,6 +52,9 @@ public sealed class FolderRecord
     public int? ContractId { get; set; }
     public string ContractTitle { get; set; } = "";
 
+    /// <summary>Откуда взят договор («По папке …», «Выбран вручную») или почему его нет («Договора #940 нет на сайте»).</summary>
+    public string ContractNote { get; set; } = "";
+
     /// <summary>Договор выбран вручную: при повторных проверках определять его заново нельзя.</summary>
     public bool ContractPinned { get; set; }
     public int Documents { get; set; }

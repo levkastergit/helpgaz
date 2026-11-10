@@ -12,6 +12,9 @@ public sealed class FolderScanResult
     public required string Folder { get; init; }
     public Contract? Contract { get; init; }
     public IReadOnlyList<ContractCandidate> Candidates { get; init; } = Array.Empty<ContractCandidate>();
+
+    /// <summary>Папка названа ITD_Files_&lt;id&gt;, а договора с этим id на сайте нет.</summary>
+    public int? MissingContractId { get; init; }
     public int Documents { get; init; }
     public int DocumentsClean { get; init; }
     public int Findings { get; init; }
@@ -73,7 +76,8 @@ public sealed class Scanner(SiteClient site, FindingsStore store)
         IReadOnlyList<SiteTemplate> templates, IReadOnlyList<SiteTemplate> custom, IReadOnlyList<Contract> contracts,
         IProgress<ScanProgress>? progress, CancellationToken ct)
     {
-        var (contract, candidates) = ResolveContract(folder, contracts);
+        var (match, note) = ResolveContract(folder, contracts);
+        var contract = match.Contract;
         var docs = new List<DocumentResult>();
         var findings = new List<Finding>();
         var files = DocxFiles(folder).ToList();
@@ -142,6 +146,7 @@ public sealed class Scanner(SiteClient site, FindingsStore store)
             Path = folder,
             ContractId = contract?.Id,
             ContractTitle = contract is null ? "" : Title(contract),
+            ContractNote = note,
             ContractPinned = existing?.ContractPinned == true && contract is not null,
             Documents = docs.Count,
             DocumentsClean = clean,
@@ -153,23 +158,32 @@ public sealed class Scanner(SiteClient site, FindingsStore store)
         {
             Folder = folder,
             Contract = contract,
-            Candidates = candidates,
+            Candidates = match.Candidates,
+            MissingContractId = match.MissingId,
             Documents = docs.Count,
             DocumentsClean = clean,
             Findings = findings.Count(f => f.Kind != FindingKind.FrozenField),
         };
     }
 
-    private (Contract?, IReadOnlyList<ContractCandidate>) ResolveContract(string folder, IReadOnlyList<Contract> contracts)
+    /// <summary>Договор папки и пояснение, откуда он взялся или почему его нет.</summary>
+    private (ContractMatch Match, string Note) ResolveContract(string folder, IReadOnlyList<Contract> contracts)
     {
         var known = store.Folder(folder);
         if (known?.ContractPinned == true && known.ContractId is { } id)
         {
             var pinned = contracts.FirstOrDefault(c => c.Id == id);
-            if (pinned is not null) return (pinned, Array.Empty<ContractCandidate>());
+            if (pinned is not null) return (new ContractMatch(pinned, Array.Empty<ContractCandidate>()), "Выбран вручную");
         }
-        var match = ContractMatcher.Match(Path.GetFileName(folder.TrimEnd('\\', '/')), contracts);
-        return (match.Contract, match.Candidates);
+
+        var match = ContractMatcher.MatchPath(folder, contracts);
+        var note = match switch
+        {
+            { MissingId: { } missing } => $"Договора #{missing} нет на сайте",
+            { Contract: not null, FromParent: { } parent } => $"По папке «{parent}»",
+            _ => "",
+        };
+        return (match, note);
     }
 
     public static string Title(Contract c)

@@ -319,8 +319,10 @@ internal sealed class MainForm : Form
 
             var withFindings = results.Count(r => r.Findings > 0);
             var noContract = results.Count(r => r.Contract is null);
+            var missing = results.Count(r => r.MissingContractId is not null);
             _status.Text = $"Готово: папок {results.Count}, с находками {withFindings}"
-                + (noContract > 0 ? $", без договора {noContract} (значения в них не сверялись)" : "");
+                + (noContract > 0 ? $", без договора {noContract} (значения в них не сверялись)" : "")
+                + (missing > 0 ? $"; из них {missing} — архивы ITD_Files с номером договора, которого нет на сайте" : "");
         }
         catch (OperationCanceledException)
         {
@@ -365,10 +367,13 @@ internal sealed class MainForm : Form
         foreach (var f in _store.Folders().Where(f => f.LastScan is not null).OrderBy(f => f.Path, StringComparer.CurrentCultureIgnoreCase))
         {
             var verdict = f.Findings == 0 ? "Всё совпало" : "Есть находки";
-            var contract = f.ContractTitle.Length > 0 ? f.ContractTitle : "Договор не определён";
+            var contract = f.ContractTitle.Length > 0 ? f.ContractTitle
+                : f.ContractNote.Length > 0 ? f.ContractNote
+                : "Договор не определён";
             var row = _folders.Rows[_folders.Rows.Add(Path.GetFileName(f.Path.TrimEnd('\\', '/')), contract, f.Documents, f.DocumentsClean, f.Findings, verdict)];
             row.Tag = f.Path;
             row.Cells[0].ToolTipText = f.Path;
+            row.Cells[1].ToolTipText = f.ContractNote;
             row.DefaultCellStyle.ForeColor = f.Findings == 0 ? Color.ForestGreen : SystemColors.ControlText;
             if (f.ContractTitle.Length == 0) row.Cells[1].Style.ForeColor = Color.Firebrick;
             if (f.Path == selected) row.Selected = true;

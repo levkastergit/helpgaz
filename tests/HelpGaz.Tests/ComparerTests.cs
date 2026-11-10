@@ -307,7 +307,42 @@ public class ComparerTests
     public void SiteArchiveNameWithUnknownIdChoosesNothing()
     {
         var contracts = new[] { new Contract(1, "", "", "", "") };
-        Assert.Null(ContractMatcher.Match("ITD_Files_1235", contracts).Contract);
+        var match = ContractMatcher.Match("ITD_Files_1235 (1)", contracts);
+        Assert.Null(match.Contract);
+        Assert.Equal(1235, match.MissingId);
+    }
+
+    private static readonly Contract[] WithArchive = RealisticContracts.Append(new Contract(1235, "", "", "Архивов Ян Янович", "")).ToArray();
+
+    [Theory]
+    [InlineData(@"X:\ИТД\ITD_Files_1235\Новая папка", 1235, "ITD_Files_1235")]
+    [InlineData(@"X:\ИТД\148 Образцов И.В. 03 ноября 2022\Акты\Новая папка", 3, "148 Образцов И.В. 03 ноября 2022")]
+    [InlineData(@"X:\ИТД\ITD_Files_1235", 1235, null)]
+    public void SubfolderTakesContractFromParent(string path, int id, string? parent)
+    {
+        var match = ContractMatcher.MatchPath(path, WithArchive);
+        Assert.Equal(id, match.Contract?.Id);
+        Assert.Equal(parent, match.FromParent);
+    }
+
+    [Fact]
+    public void SubfolderOfMissingArchiveReportsMissingId()
+    {
+        var match = ContractMatcher.MatchPath(@"X:\ИТД\ITD_Files_940\Новая папка", WithArchive);
+        Assert.Null(match.Contract);
+        Assert.Equal(940, match.MissingId);
+    }
+
+    [Theory]
+    [InlineData(@"X:\ITD_Files_1235\Двойников\Новая папка", 2)]
+    [InlineData(@"X:\ITD_Files_1235\Акты\Сварка\Новая папка", 0)]
+    [InlineData(@"X:\Документы\Новая папка", 0)]
+    public void ParentSearchStopsAtAmbiguousOrDistantFolders(string path, int candidates)
+    {
+        var match = ContractMatcher.MatchPath(path, WithArchive);
+        Assert.Null(match.Contract);
+        Assert.Null(match.MissingId);
+        Assert.Equal(candidates, match.Candidates.Count);
     }
 
     [Theory]

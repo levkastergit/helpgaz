@@ -5,7 +5,14 @@ namespace HelpGaz.Core.Site;
 
 public sealed record ContractCandidate(Contract Contract, int Score);
 
-public sealed record ContractMatch(Contract? Contract, IReadOnlyList<ContractCandidate> Candidates);
+public sealed record ContractMatch(Contract? Contract, IReadOnlyList<ContractCandidate> Candidates)
+{
+    /// <summary>Папка названа как архив сайта ITD_Files_&lt;id&gt;, но договора с таким id в списке сайта нет.</summary>
+    public int? MissingId { get; init; }
+
+    /// <summary>Имя родительской папки, по которому определён договор; null, если по имени самой папки.</summary>
+    public string? FromParent { get; init; }
+}
 
 /// <summary>
 /// Определяет договор по названию папки. Неверный договор хуже отсутствующего: он засоряет журнал ложными
@@ -58,12 +65,39 @@ public static class ContractMatcher
 
     private static List<string> Tokens(string s) => WordRx.Matches(Normalize(s)).Select(m => m.Value).ToList();
 
+    /// <summary>
+    /// Сначала по имени самой папки. Подпапка с общим именем («Новая папка», «Акты») берёт договор
+    /// у ближайшей родительской папки, но не выше <paramref name="maxParents"/> уровней.
+    /// </summary>
+    public static ContractMatch MatchPath(string folderPath, IReadOnlyList<Contract> contracts, int maxParents = 2)
+    {
+        var dir = folderPath.TrimEnd('\\', '/');
+        var own = Match(Path.GetFileName(dir), contracts);
+        if (own.Contract is not null || own.MissingId is not null) return own;
+
+        var parent = Path.GetDirectoryName(dir);
+        for (var level = 0; level < maxParents && !string.IsNullOrEmpty(parent); level++, parent = Path.GetDirectoryName(parent))
+        {
+            var name = Path.GetFileName(parent);
+            if (string.IsNullOrEmpty(name)) break;
+            var up = Match(name, contracts);
+            if (up.Contract is not null || up.MissingId is not null) return up with { FromParent = name };
+            // Родитель сам неоднозначен: выше подниматься нельзя, там уже чужие папки.
+            if (up.Candidates.Count > 0) return own.Candidates.Count > 0 ? own : up;
+        }
+        return own;
+    }
+
     public static ContractMatch Match(string folderName, IReadOnlyList<Contract> contracts)
     {
         var archive = SiteArchiveName.Match(folderName.Trim());
-        if (archive.Success && int.TryParse(archive.Groups[1].Value, out var contractId)
-            && contracts.FirstOrDefault(c => c.Id == contractId) is { } exact)
-            return new ContractMatch(exact, new[] { new ContractCandidate(exact, int.MaxValue) });
+        if (archive.Success && int.TryParse(archive.Groups[1].Value, out var contractId))
+        {
+            var exact = contracts.FirstOrDefault(c => c.Id == contractId);
+            return exact is null
+                ? new ContractMatch(null, Array.Empty<ContractCandidate>()) { MissingId = contractId }
+                : new ContractMatch(exact, new[] { new ContractCandidate(exact, int.MaxValue) });
+        }
 
         var folder = Parse(folderName);
         var candidates = contracts
