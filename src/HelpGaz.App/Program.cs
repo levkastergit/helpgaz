@@ -38,6 +38,7 @@ internal static class AppPaths
     public static readonly string Findings = Path.Combine(Root, "findings.json");
     public static readonly string Session = Path.Combine(Root, "session.bin");
     public static readonly string Logs = Path.Combine(Root, "logs");
+    public static readonly string Templates = Path.Combine(Root, "templates");
 }
 
 /// <summary>Токен сайта хранится зашифрованным средствами Windows. Пароль на диск не записывается.</summary>

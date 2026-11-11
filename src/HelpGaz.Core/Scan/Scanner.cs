@@ -27,6 +27,9 @@ public sealed class Scanner(SiteClient site, FindingsStore store)
 {
     private readonly Dictionary<int, TemplateModel> _templates = new();
 
+    /// <summary>Куда сохранять скачанные шаблоны для наглядного сравнения. Null — не сохранять.</summary>
+    public TemplateCache? Cache { get; init; }
+
     /// <summary>Все папки, где прямо внутри есть хотя бы один .docx, включая саму указанную.</summary>
     public static List<string> FindObjectFolders(string root)
     {
@@ -250,7 +253,17 @@ public sealed class Scanner(SiteClient site, FindingsStore store)
     private async Task<TemplateModel> TemplateFor(ResolvedDocument resolved, CancellationToken ct)
     {
         if (_templates.TryGetValue(resolved.TemplateId, out var cached)) return cached;
-        var model = TemplateModel.Parse(DocxReader.Read(await site.DownloadTemplateAsync(resolved.TemplateId, ct)));
+        var bytes = await site.DownloadTemplateAsync(resolved.TemplateId, ct);
+        var model = TemplateModel.Parse(DocxReader.Read(bytes));
+        try
+        {
+            Cache?.Save(resolved.TemplateFile, bytes);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // Без копии шаблона не будет только наглядного сравнения, сама проверка от этого не зависит.
+            AppLog.Warn($"Не удалось сохранить копию шаблона «{resolved.TemplateFile}»: {e.Message}");
+        }
         _templates[resolved.TemplateId] = model;
         return model;
     }

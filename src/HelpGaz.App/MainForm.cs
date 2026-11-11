@@ -1,6 +1,7 @@
 ﻿using System.Diagnostics;
 using HelpGaz.Core.Compare;
 using HelpGaz.Core.Diagnostics;
+using HelpGaz.Core.Docx;
 using HelpGaz.Core.Log;
 using HelpGaz.Core.Scan;
 using HelpGaz.Core.Site;
@@ -11,6 +12,11 @@ internal sealed class MainForm : Form
 {
     private readonly SiteClient _site = new();
     private readonly FindingsStore _store = new(AppPaths.Findings);
+    private readonly TemplateCache _templateCache = new(AppPaths.Templates);
+    private readonly Dictionary<string, (DateTime Stamp, TemplateModel Model)> _templateModels = new();
+    private int _detailsVersion;
+    private readonly System.Windows.Forms.Timer _detailsDelay = new() { Interval = 150 };
+    private string _detailsHtml = "";
     private readonly Dictionary<string, IReadOnlyList<ContractCandidate>> _candidates = new(StringComparer.OrdinalIgnoreCase);
     private CancellationTokenSource? _scan;
     private string? _email;
@@ -33,7 +39,13 @@ internal sealed class MainForm : Form
     private readonly Label _count = new() { AutoSize = true, Margin = new Padding(12, 7, 3, 3) };
     private readonly DataGridView _groups = Grid();
     private readonly DataGridView _occurrences = Grid();
-    private readonly RichTextBox _details = new() { Dock = DockStyle.Fill, ReadOnly = true, BorderStyle = BorderStyle.FixedSingle, BackColor = SystemColors.Window };
+    private readonly WebBrowser _view = new()
+    {
+        Dock = DockStyle.Fill,
+        AllowWebBrowserDrop = false,
+        ScriptErrorsSuppressed = true,
+        WebBrowserShortcutsEnabled = true,
+    };
 
     private readonly ToolStripStatusLabel _status = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft, Text = "Готово" };
     private readonly ToolStripProgressBar _progress = new() { Width = 220, Visible = false };
@@ -170,15 +182,23 @@ internal sealed class MainForm : Form
         right.Controls.Add(_occurrences);
         right.Controls.Add(statusButtons);
 
+        var wide = new Button { Text = "Открыть сравнение в отдельном окне", AutoSize = true, Dock = DockStyle.Bottom };
+        wide.Click += (_, _) => ShowComparisonWindow();
+        var viewFrame = new Panel { Dock = DockStyle.Fill, BorderStyle = BorderStyle.FixedSingle };
+        viewFrame.Controls.Add(_view);
+        var left = new Panel { Dock = DockStyle.Fill };
+        left.Controls.Add(viewFrame);
+        left.Controls.Add(wide);
+
         var bottom = new SplitContainer { Dock = DockStyle.Fill, SplitterWidth = 6 };
-        bottom.Panel1.Controls.Add(_details);
+        bottom.Panel1.Controls.Add(left);
         bottom.Panel2.Controls.Add(right);
-        bottom.HandleCreated += (_, _) => bottom.SplitterDistance = bottom.Width / 2;
+        bottom.HandleCreated += (_, _) => bottom.SplitterDistance = bottom.Width * 65 / 100;
 
         var main = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterWidth = 6 };
         main.Panel1.Controls.Add(_groups);
         main.Panel2.Controls.Add(bottom);
-        main.HandleCreated += (_, _) => main.SplitterDistance = main.Height * 55 / 100;
+        main.HandleCreated += (_, _) => main.SplitterDistance = main.Height * 40 / 100;
 
         var page = new TabPage("Находки") { Padding = new Padding(6) };
         page.Controls.Add(main);
@@ -217,6 +237,9 @@ internal sealed class MainForm : Form
         _search.TextChanged += (_, _) => FillGroups();
         _groups.SelectionChanged += (_, _) => FillOccurrences();
         _occurrences.SelectionChanged += (_, _) => ShowDetails();
+        _detailsDelay.Tick += (_, _) => { _detailsDelay.Stop(); ShowDetailsNow(); };
+        // Сравнение — готовая страница: переходы по ссылкам в ней не нужны.
+        _view.Navigating += (_, e) => { if (e.Url?.ToString() != "about:blank") e.Cancel = true; };
         _occurrences.CellDoubleClick += (_, e) => { if (e.RowIndex >= 0) OpenSelectedFile(); };
     }
 
@@ -342,7 +365,7 @@ internal sealed class MainForm : Form
         _scan = new CancellationTokenSource();
         var token = _scan.Token;
         var needRelogin = false;
-        var scanner = new Scanner(_site, _store);
+        var scanner = new Scanner(_site, _store) { Cache = _templateCache };
         string StoppedAt() => scanner.CurrentFolder is { } f ? $" на папке «{Path.GetFileName(f)}»" : "";
         const string Stale = " Папки после неё показывают результаты прошлой проверки (см. столбец «Проверено»).";
 
@@ -541,7 +564,7 @@ internal sealed class MainForm : Form
     {
         _occurrences.Rows.Clear();
         var group = SelectedGroup();
-        if (group is null) { _details.Clear(); return; }
+        if (group is null) { ShowDetails(); return; }
 
         var scope = Scope();
         foreach (var o in group.Occurrences.Where(o => InScope(o.Folder, scope)).OrderBy(o => o.Folder, StringComparer.CurrentCultureIgnoreCase))
@@ -552,57 +575,146 @@ internal sealed class MainForm : Form
         ShowDetails();
     }
 
+    private static readonly HashSet<FindingKind> NoVisual = new() { FindingKind.UnknownDocument, FindingKind.Error };
+
+    /// <summary>Показывает шаблон и файл рядом для выбранной находки. Файл и шаблон читаются в фоне.</summary>
+    /// <summary>
+    /// При смене фильтра выбор строки меняется несколько раз подряд. Страница строится один раз, когда выбор
+    /// успокоился: частая перезагрузка встроенного браузера портит отрисовку шрифтов.
+    /// </summary>
     private void ShowDetails()
     {
-        var group = SelectedGroup();
-        _details.Clear();
-        if (group is null) return;
-
-        var occurrence = _occurrences.CurrentRow?.Tag as Occurrence ?? group.Occurrences.FirstOrDefault();
-        var expected = occurrence?.Expected ?? group.Expected;
-        var actual = occurrence?.Actual ?? group.Actual;
-
-        Append(FindingKinds.Title(group.Kind) + "\n", bold: true);
-        Append(group.Template + "\n", color: SystemColors.GrayText);
-        if (group.Tag.Length > 0) Append("Поле: {" + group.Tag + "}\n", color: SystemColors.GrayText);
-        Append("\n");
-
-        if (expected.Length > 0 && actual.Length > 0)
-        {
-            var ops = TextDiff.Diff(expected, actual);
-            Append("Должно быть:\n", bold: true);
-            foreach (var op in ops.Where(o => o.Kind != DiffKind.Insert))
-                Append(op.Text, background: op.Kind == DiffKind.Delete ? Color.MistyRose : null);
-            Append("\n\nВ файле:\n", bold: true);
-            foreach (var op in ops.Where(o => o.Kind != DiffKind.Delete))
-                Append(op.Text, background: op.Kind == DiffKind.Insert ? Color.PaleGreen : null);
-        }
-        else if (expected.Length > 0)
-        {
-            Append("Должно быть:\n", bold: true);
-            Append(expected);
-        }
-        else if (actual.Length > 0)
-        {
-            Append("В файле:\n", bold: true);
-            Append(actual);
-        }
-        else
-        {
-            Append(group.Summary);
-        }
-        _details.SelectionStart = 0;
-        _details.ScrollToCaret();
+        ++_detailsVersion;
+        _detailsDelay.Stop();
+        _detailsDelay.Start();
     }
 
-    private void Append(string text, bool bold = false, Color? color = null, Color? background = null)
+    private async void ShowDetailsNow()
     {
-        _details.SelectionStart = _details.TextLength;
-        _details.SelectionLength = 0;
-        _details.SelectionFont = new Font(_details.Font, bold ? FontStyle.Bold : FontStyle.Regular);
-        _details.SelectionColor = color ?? SystemColors.WindowText;
-        _details.SelectionBackColor = background ?? _details.BackColor;
-        _details.AppendText(text);
+        var version = ++_detailsVersion;
+        var group = SelectedGroup();
+        if (group is null)
+        {
+            SetHtml(ComparisonHtml.Message("Выберите находку", "Выберите строку в списке сверху: здесь появятся шаблон и ваш файл рядом, отличия выделены цветом."));
+            return;
+        }
+
+        var scope = Scope();
+        var occurrence = _occurrences.CurrentRow?.Tag as Occurrence ?? group.Occurrences.FirstOrDefault(o => InScope(o.Folder, scope));
+        var expected = occurrence?.Expected ?? group.Expected;
+        var actual = occurrence?.Actual ?? group.Actual;
+        var title = FindingKinds.Title(group.Kind);
+        var subtitle = group.Template + (group.Tag.Length > 0 ? " · поле {" + group.Tag + "}" : "")
+            + (occurrence is null ? "" : " · папка «" + Path.GetFileName(occurrence.Folder.TrimEnd('\\', '/')) + "»");
+        var brief = Brief(group, expected, actual);
+
+        if (occurrence is null || NoVisual.Contains(group.Kind))
+        {
+            SetHtml(ComparisonHtml.Render(title, subtitle, brief, "", null, null));
+            return;
+        }
+
+        var kind = group.Kind;
+        var templateName = group.Template;
+        var build = Task.Run(() => BuildComparison(title, subtitle, brief, kind, templateName, occurrence));
+        // Заглушку показываем, только если сравнение строится заметно долго.
+        if (await Task.WhenAny(build, Task.Delay(400)) != build && version == _detailsVersion)
+            SetHtml(ComparisonHtml.Render(title, subtitle, brief, occurrence.File, null, "Строю сравнение…"));
+        var html = await build;
+        if (version == _detailsVersion) SetHtml(html);
+    }
+
+    private static List<(string Label, string Text)> Brief(FindingGroup g, string expected, string actual)
+    {
+        var lines = new List<(string, string)> { ("Суть:", g.Summary) };
+        switch (g.Kind)
+        {
+            case FindingKind.ValueMismatch:
+                lines.Add(("Сайт по договору подставляет:", expected));
+                lines.Add(("В файле:", actual));
+                break;
+            case FindingKind.FolderConflict:
+                lines.Add(("В остальных документах папки:", expected));
+                lines.Add(("В этом документе:", actual));
+                break;
+            case FindingKind.CharFormatting or FindingKind.ParaFormatting or FindingKind.PageLayout:
+                lines.Add(("В шаблоне:", expected));
+                lines.Add(("В файле:", actual));
+                break;
+            case FindingKind.Error:
+                lines.Add(("Ошибка:", actual));
+                break;
+        }
+        return lines;
+    }
+
+    private string BuildComparison(string title, string subtitle, List<(string Label, string Text)> brief, FindingKind kind, string templateName, Occurrence o)
+    {
+        var path = Path.Combine(o.Folder, o.File);
+        try
+        {
+            if (!File.Exists(path))
+                return ComparisonHtml.Render(title, subtitle, brief, o.File, null, "Файл не найден: " + path);
+
+            var template = LoadTemplate(templateName);
+            if (template is null)
+                return ComparisonHtml.Render(title, subtitle, brief, o.File, null,
+                    "Копии шаблона пока нет: программа сохраняет её при проверке, начиная с версии 1.0.6. Проверьте эту папку ещё раз, и сравнение появится.");
+
+            byte[] bytes;
+            // Открытый в Word файл читать можно, если не требовать монопольного доступа.
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var ms = new MemoryStream())
+            {
+                stream.CopyTo(ms);
+                bytes = ms.ToArray();
+            }
+            var cmp = SideBySide.Build(template, DocxReader.Read(bytes), kind, o.Where, o.Expected, o.Actual);
+            return ComparisonHtml.Render(title, subtitle, brief, o.File, cmp, null);
+        }
+        catch (Exception e)
+        {
+            AppLog.Error($"Не удалось построить сравнение для «{path}»", e);
+            return ComparisonHtml.Render(title, subtitle, brief, o.File, null, "Не удалось построить сравнение: " + e.Message);
+        }
+    }
+
+    private TemplateModel? LoadTemplate(string templateName)
+    {
+        var path = _templateCache.PathFor(templateName);
+        if (!File.Exists(path)) return null;
+        var stamp = File.GetLastWriteTimeUtc(path);
+        lock (_templateModels)
+        {
+            if (_templateModels.TryGetValue(templateName, out var cached) && cached.Stamp == stamp) return cached.Model;
+        }
+        var model = TemplateModel.Parse(DocxReader.Read(File.ReadAllBytes(path)));
+        lock (_templateModels) _templateModels[templateName] = (stamp, model);
+        return model;
+    }
+
+    private void SetHtml(string html)
+    {
+        if (html == _detailsHtml) return;
+        _detailsHtml = html;
+        _view.DocumentText = html;
+    }
+
+    private void ShowComparisonWindow()
+    {
+        if (_detailsHtml.Length == 0) return;
+        var browser = new WebBrowser { Dock = DockStyle.Fill, AllowWebBrowserDrop = false, ScriptErrorsSuppressed = true, DocumentText = _detailsHtml };
+        browser.Navigating += (_, e) => { if (e.Url?.ToString() != "about:blank") e.Cancel = true; };
+        var form = new Form
+        {
+            Text = "Сравнение с шаблоном — HelpGaz",
+            StartPosition = FormStartPosition.CenterParent,
+            Size = new Size(1300, 850),
+            WindowState = FormWindowState.Maximized,
+            Icon = Icon,
+        };
+        form.Controls.Add(browser);
+        form.Show(this);
     }
 
     private void ApplyStatus(FindingStatus status)
@@ -627,6 +739,7 @@ internal sealed class MainForm : Form
         {
             _site.Dispose();
             _scan?.Dispose();
+            _detailsDelay.Dispose();
         }
         base.Dispose(disposing);
     }
