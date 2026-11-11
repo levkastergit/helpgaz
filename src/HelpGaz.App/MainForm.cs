@@ -20,6 +20,7 @@ internal sealed class MainForm : Form
     private readonly Button _browse = new() { Text = "Обзор…", AutoSize = true };
     private readonly Button _start = new() { Text = "Проверить", AutoSize = true, Font = new Font(DefaultFont, FontStyle.Bold) };
     private readonly Button _stop = new() { Text = "Стоп", AutoSize = true, Enabled = false };
+    private readonly CheckBox _onlyCurrent = new() { Text = "Показывать только эту папку", Checked = true, AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly LinkLabel _account = new() { AutoSize = true, Anchor = AnchorStyles.Right };
 
     private readonly DataGridView _folders = Grid();
@@ -75,16 +76,17 @@ internal sealed class MainForm : Form
 
     private void BuildLayout()
     {
-        var top = new TableLayoutPanel { Dock = DockStyle.Top, Height = 46, ColumnCount = 6, Padding = new Padding(8, 8, 8, 4) };
+        var top = new TableLayoutPanel { Dock = DockStyle.Top, Height = 46, ColumnCount = 7, Padding = new Padding(8, 8, 8, 4) };
         top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (var i = 0; i < 4; i++) top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        for (var i = 0; i < 5; i++) top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         top.Controls.Add(new Label { Text = "Папка ИТД:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
         top.Controls.Add(_path, 1, 0);
         top.Controls.Add(_browse, 2, 0);
         top.Controls.Add(_start, 3, 0);
         top.Controls.Add(_stop, 4, 0);
-        top.Controls.Add(_account, 5, 0);
+        top.Controls.Add(_onlyCurrent, 5, 0);
+        top.Controls.Add(_account, 6, 0);
 
         var tabs = new TabControl { Dock = DockStyle.Fill };
         tabs.TabPages.Add(BuildFoldersTab());
@@ -191,6 +193,8 @@ internal sealed class MainForm : Form
 
         _browse.Click += (_, _) => Browse();
         _start.Click += async (_, _) => await ScanAsync(_path.Text.Trim());
+        _onlyCurrent.CheckedChanged += (_, _) => RefreshAll();
+        _path.TextChanged += (_, _) => { if (_onlyCurrent.Checked) RefreshAll(); };
         _stop.Click += (_, _) => { _scan?.Cancel(); _status.Text = "Останавливаю проверку…"; };
         _account.LinkClicked += (_, _) => AccountClicked();
 
@@ -414,12 +418,35 @@ internal sealed class MainForm : Form
 
     private string? SelectedFolder() => _folders.CurrentRow?.Tag as string;
 
+    /// <summary>
+    /// Папка из поля «Папка ИТД» вместе с подпапками. null, если показывать надо всё:
+    /// флажок снят, поле пустое или путь в нём неверный.
+    /// </summary>
+    private string? Scope()
+    {
+        var text = _path.Text.Trim();
+        if (!_onlyCurrent.Checked || text.Length == 0) return null;
+        try { return Path.GetFullPath(text).TrimEnd('\\', '/'); }
+        catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException) { return null; }
+    }
+
+    private static bool InScope(string path, string? scope)
+    {
+        if (scope is null) return true;
+        string full;
+        try { full = Path.GetFullPath(path).TrimEnd('\\', '/'); }
+        catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException) { return false; }
+        return full.Equals(scope, StringComparison.OrdinalIgnoreCase)
+            || full.StartsWith(scope + "\\", StringComparison.OrdinalIgnoreCase);
+    }
+
     private void FillFolders()
     {
         var selected = SelectedFolder();
         _folders.Rows.Clear();
         var current = Updater.CurrentVersion.ToString(3);
-        foreach (var f in _store.Folders().Where(f => f.LastScan is not null).OrderBy(f => f.Path, StringComparer.CurrentCultureIgnoreCase))
+        var scope = Scope();
+        foreach (var f in _store.Folders().Where(f => f.LastScan is not null && InScope(f.Path, scope)).OrderBy(f => f.Path, StringComparer.CurrentCultureIgnoreCase))
         {
             var verdict = f.Findings == 0 ? "Всё совпало" : "Есть находки";
             var contract = f.ContractTitle.Length > 0 ? f.ContractTitle
@@ -483,21 +510,26 @@ internal sealed class MainForm : Form
             _ => (int)g.Status == statusIndex - 2,
         };
 
+        var scope = Scope();
+        int Folders(FindingGroup g) => g.Occurrences.Where(o => InScope(o.Folder, scope))
+            .Select(o => o.Folder).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+
         var groups = _store.Groups()
+            .Where(g => scope is null || Folders(g) > 0)
             .Where(StatusOk)
             .Where(g => kindIndex == 0 || (int)g.Kind == kindIndex - 1)
             .Where(g => query.Length == 0
                 || g.Template.Contains(query, StringComparison.CurrentCultureIgnoreCase)
                 || g.Summary.Contains(query, StringComparison.CurrentCultureIgnoreCase))
             .OrderBy(g => g.Kind == FindingKind.FrozenField ? 1 : 0)
-            .ThenByDescending(g => g.FolderCount)
+            .ThenByDescending(Folders)
             .ThenBy(g => g.Template, StringComparer.CurrentCultureIgnoreCase)
             .ToList();
 
         _groups.Rows.Clear();
         foreach (var g in groups)
         {
-            var row = _groups.Rows[_groups.Rows.Add(FindingStatuses.Title(g.Status), FindingKinds.Title(g.Kind), g.Template, g.Summary, g.FolderCount)];
+            var row = _groups.Rows[_groups.Rows.Add(FindingStatuses.Title(g.Status), FindingKinds.Title(g.Kind), g.Template, g.Summary, Folders(g))];
             row.Tag = g;
             if (g.Key == key) { row.Selected = true; _groups.CurrentCell = row.Cells[0]; }
         }
@@ -511,7 +543,8 @@ internal sealed class MainForm : Form
         var group = SelectedGroup();
         if (group is null) { _details.Clear(); return; }
 
-        foreach (var o in group.Occurrences.OrderBy(o => o.Folder, StringComparer.CurrentCultureIgnoreCase))
+        var scope = Scope();
+        foreach (var o in group.Occurrences.Where(o => InScope(o.Folder, scope)).OrderBy(o => o.Folder, StringComparer.CurrentCultureIgnoreCase))
         {
             var row = _occurrences.Rows[_occurrences.Rows.Add(Path.GetFileName(o.Folder.TrimEnd('\\', '/')), o.File, o.Where)];
             row.Tag = o;
