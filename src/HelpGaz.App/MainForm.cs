@@ -15,6 +15,8 @@ internal sealed class MainForm : Form
     private readonly TemplateCache _templateCache = new(AppPaths.Templates);
     private readonly Dictionary<string, (DateTime Stamp, TemplateModel Model)> _templateModels = new();
     private int _detailsVersion;
+    private readonly SemaphoreSlim _templateDownload = new(1, 1);
+    private IReadOnlyList<SiteTemplate>? _siteTemplates;
     private readonly System.Windows.Forms.Timer _detailsDelay = new() { Interval = 150 };
     private string _detailsHtml = "";
     private readonly Dictionary<string, IReadOnlyList<ContractCandidate>> _candidates = new(StringComparer.OrdinalIgnoreCase);
@@ -421,6 +423,7 @@ internal sealed class MainForm : Form
         finally
         {
             SetBusy(false);
+            _siteTemplates = null;
             RefreshAll();
         }
 
@@ -616,7 +619,9 @@ internal sealed class MainForm : Form
 
         var kind = group.Kind;
         var templateName = group.Template;
-        var build = Task.Run(() => BuildComparison(title, subtitle, brief, kind, templateName, occurrence));
+        // Во время проверки сайт не нагружаем вторым потоком запросов: запросы к нему идут строго по одному.
+        var canDownload = _email is not null && !_busy;
+        var build = Task.Run(() => BuildComparisonAsync(title, subtitle, brief, kind, templateName, occurrence, canDownload));
         // Заглушку показываем, только если сравнение строится заметно долго.
         if (await Task.WhenAny(build, Task.Delay(400)) != build && version == _detailsVersion)
             SetHtml(ComparisonHtml.Render(title, subtitle, brief, occurrence.File, null, "Строю сравнение…"));
@@ -648,7 +653,7 @@ internal sealed class MainForm : Form
         return lines;
     }
 
-    private string BuildComparison(string title, string subtitle, List<(string Label, string Text)> brief, FindingKind kind, string templateName, Occurrence o)
+    private async Task<string> BuildComparisonAsync(string title, string subtitle, List<(string Label, string Text)> brief, FindingKind kind, string templateName, Occurrence o, bool canDownload)
     {
         var path = Path.Combine(o.Folder, o.File);
         try
@@ -658,8 +663,16 @@ internal sealed class MainForm : Form
 
             var template = LoadTemplate(templateName);
             if (template is null)
-                return ComparisonHtml.Render(title, subtitle, brief, o.File, null,
-                    "Копии шаблона пока нет: программа сохраняет её при проверке, начиная с версии 1.0.6. Проверьте эту папку ещё раз, и сравнение появится.");
+            {
+                if (!canDownload)
+                    return ComparisonHtml.Render(title, subtitle, brief, o.File, null, _email is null
+                        ? "Копии шаблона на этом компьютере нет. Войдите на сайт (ссылка справа вверху), и программа скачает шаблон для сравнения."
+                        : "Копии шаблона на этом компьютере нет. Скачаю её с сайта, когда закончится проверка: выберите находку ещё раз.");
+                var problem = await DownloadTemplateAsync(templateName);
+                if (problem is not null) return ComparisonHtml.Render(title, subtitle, brief, o.File, null, problem);
+                template = LoadTemplate(templateName);
+                if (template is null) return ComparisonHtml.Render(title, subtitle, brief, o.File, null, "Шаблон скачан, но прочитать его копию не удалось. Подробности в логе программы.");
+            }
 
             byte[] bytes;
             // Открытый в Word файл читать можно, если не требовать монопольного доступа.
@@ -676,6 +689,40 @@ internal sealed class MainForm : Form
         {
             AppLog.Error($"Не удалось построить сравнение для «{path}»", e);
             return ComparisonHtml.Render(title, subtitle, brief, o.File, null, "Не удалось построить сравнение: " + e.Message);
+        }
+    }
+
+    /// <summary>Скачивает шаблон, которого нет в копиях: например, находка осталась от проверки версией до 1.0.6.</summary>
+    /// <returns>Null при успехе, иначе понятное объяснение, почему сравнения не будет.</returns>
+    private async Task<string?> DownloadTemplateAsync(string templateName)
+    {
+        await _templateDownload.WaitAsync();
+        try
+        {
+            if (File.Exists(_templateCache.PathFor(templateName))) return null;
+            _siteTemplates ??= (await _site.GetTemplatesAsync()).Concat(await _site.GetCustomItdTemplatesAsync()).ToList();
+            var template = _siteTemplates.FirstOrDefault(t => t.FileName == templateName);
+            if (template is null)
+            {
+                AppLog.Warn($"Шаблона «{templateName}» нет среди шаблонов сайта: сравнение не построено");
+                return $"Шаблона «{templateName}» сейчас нет на сайте: возможно, его переименовали или удалили. Проверьте папку заново.";
+            }
+            _templateCache.Save(templateName, await _site.DownloadTemplateAsync(template.Id));
+            AppLog.Info($"Для сравнения скачан шаблон #{template.Id} «{templateName}»");
+            return null;
+        }
+        catch (SiteAuthException)
+        {
+            return "Сессия сайта истекла. Нажмите «выйти» справа вверху, войдите снова и выберите находку ещё раз.";
+        }
+        catch (Exception e) when (e is SiteException or HttpRequestException or TaskCanceledException or IOException or UnauthorizedAccessException)
+        {
+            AppLog.Error($"Не удалось скачать шаблон «{templateName}» для сравнения", e);
+            return "Не удалось скачать шаблон с сайта: " + e.Message;
+        }
+        finally
+        {
+            _templateDownload.Release();
         }
     }
 
@@ -740,6 +787,7 @@ internal sealed class MainForm : Form
             _site.Dispose();
             _scan?.Dispose();
             _detailsDelay.Dispose();
+            _templateDownload.Dispose();
         }
         base.Dispose(disposing);
     }
